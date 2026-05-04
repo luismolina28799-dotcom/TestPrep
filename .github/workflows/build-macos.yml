@@ -1,0 +1,198 @@
+# ════════════════════════════════════════════════════════════════════
+#  Test Prep — Build de macOS via GitHub Actions
+#
+#  Compila PPA_Test_Prep.html como un .dmg universal (Apple Silicon + Intel)
+#  usando un runner macOS de GitHub. Disparado manualmente desde la UI.
+#
+#  Uso:
+#    1. Subí este archivo a tu repo en .github/workflows/build-macos.yml
+#    2. Subí también: PPA_Test_Prep.html y assets/icon.png en la raíz del repo
+#    3. En GitHub: Actions → "Build macOS .dmg" → Run workflow
+#    4. Cuando termine (~10 min la primera vez, ~3-5 min después gracias al
+#       cache), bajá el .dmg desde la sección "Artifacts" del run.
+# ════════════════════════════════════════════════════════════════════
+
+name: Build macOS .dmg
+
+# Nota: 'on' va entrecomillado porque algunos parsers YAML 1.1 lo interpretan
+# como el booleano True. GitHub Actions usa YAML 1.2 donde no es reservado, pero
+# así también pasa validadores externos sin warnings.
+"on":
+  # workflow_dispatch = botón "Run workflow" en la UI. Vos decidís cuándo correr.
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Nombre de la app (default: Test Prep)'
+        required: false
+        default: 'Test Prep'
+      app_version:
+        description: 'Versión a etiquetar en el artifact (ej. 1.0.0)'
+        required: false
+        default: '1.0.0'
+
+jobs:
+  build:
+    name: Compilar .dmg universal
+    # macos-15 corre en Apple Silicon (arm64) y soporta compilación cruzada
+    # a x86_64 mediante Rust targets, lo que nos permite producir un binario
+    # universal sin necesitar dos runners.
+    # Pin explícito a macos-15 (en vez de macos-latest) para evitar que el
+    # workflow se rompa cuando GitHub migre el alias 'latest' a macos-26.
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Bajar el código del repo ─────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Verificar archivos requeridos ────────────────────────────
+      # Falla rápido con un mensaje claro si falta algo, en lugar de una
+      # confusión 8 minutos después en medio del cargo build.
+      - name: Verificar archivos
+        run: |
+          if [ ! -f "PPA_Test_Prep.html" ]; then
+            echo "::error::Falta PPA_Test_Prep.html en la raíz del repo."
+            exit 1
+          fi
+          if [ ! -f "assets/icon.png" ]; then
+            echo "::error::Falta assets/icon.png en el repo."
+            exit 1
+          fi
+          echo "✓ Archivos requeridos presentes"
+          ls -la PPA_Test_Prep.html assets/icon.png
+
+      # ── 3. Instalar Node 22 ─────────────────────────────────────────
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # ── 4. Rust ya viene preinstalado en runners macOS, pero agregamos
+      #     el target x86_64 para poder hacer el build universal desde
+      #     un runner Apple Silicon. arm64 ya está nativo.
+      - name: Agregar target Rust x86_64-apple-darwin
+        run: rustup target add x86_64-apple-darwin
+
+      # ── 5. Cache de dependencias de Cargo ──────────────────────────
+      # La primera build descarga y compila ~400 deps de Tauri (5-10 min).
+      # Con cache, las siguientes tardan ~2-3 min. La key incluye el OS para
+      # que no mezclemos cache entre versiones de macOS.
+      - name: Cache de Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.npm
+          key: ${{ runner.os }}-cargo-pake-v1
+          restore-keys: |
+            ${{ runner.os }}-cargo-pake-
+
+      # ── 6. Instalar pake-cli globalmente ───────────────────────────
+      - name: Instalar pake-cli
+        run: npm install -g pake-cli
+
+      # ── 7. Generar icon.icns desde el PNG ──────────────────────────
+      # macOS prefiere .icns con todas las resoluciones embebidas, incluyendo
+      # @2x para retina. sips e iconutil vienen preinstalados en macOS.
+      - name: Generar icon.icns
+        run: |
+          ICONSET="assets/icon.iconset"
+          rm -rf "$ICONSET"
+          mkdir -p "$ICONSET"
+
+          sips -z 16   16   assets/icon.png --out "$ICONSET/icon_16x16.png"
+          sips -z 32   32   assets/icon.png --out "$ICONSET/icon_16x16@2x.png"
+          sips -z 32   32   assets/icon.png --out "$ICONSET/icon_32x32.png"
+          sips -z 64   64   assets/icon.png --out "$ICONSET/icon_32x32@2x.png"
+          sips -z 128  128  assets/icon.png --out "$ICONSET/icon_128x128.png"
+          sips -z 256  256  assets/icon.png --out "$ICONSET/icon_128x128@2x.png"
+          sips -z 256  256  assets/icon.png --out "$ICONSET/icon_256x256.png"
+          sips -z 512  512  assets/icon.png --out "$ICONSET/icon_256x256@2x.png"
+          sips -z 512  512  assets/icon.png --out "$ICONSET/icon_512x512.png"
+          sips -z 1024 1024 assets/icon.png --out "$ICONSET/icon_512x512@2x.png"
+
+          iconutil -c icns "$ICONSET" -o assets/icon.icns
+          rm -rf "$ICONSET"
+          ls -la assets/icon.icns
+
+      # ── 8. Construir URL file:// absoluta para Pake ────────────────
+      # Pake exige una URL completa, no una ruta relativa. La armamos a partir
+      # del workspace que GitHub Actions provee como variable.
+      - name: Preparar URL del HTML
+        id: prepare
+        run: |
+          ABS_HTML="$GITHUB_WORKSPACE/PPA_Test_Prep.html"
+          FILE_URL="file://$ABS_HTML"
+          echo "file_url=$FILE_URL" >> "$GITHUB_OUTPUT"
+          echo "URL: $FILE_URL"
+
+      # ── 9. Compilar con Pake ───────────────────────────────────────
+      # --targets universal produce un único .dmg que corre tanto en Apple
+      # Silicon como en Intel. Pesa ~2x más que un binario single-arch pero
+      # simplifica la distribución a tus alumnos (no hay que adivinar qué
+      # Mac tienen).
+      - name: Compilar .dmg con Pake
+        run: |
+          pake "${{ steps.prepare.outputs.file_url }}" \
+            --name "${{ inputs.app_name }}" \
+            --icon "$GITHUB_WORKSPACE/assets/icon.icns" \
+            --width 1100 \
+            --height 800 \
+            --targets universal
+
+      # ── 10. Localizar el .dmg generado ─────────────────────────────
+      # Pake lo deja en el directorio de trabajo. Lo movemos a dist/ con un
+      # nombre versionado para que el artifact sea ordenado.
+      - name: Empaquetar resultado
+        id: package
+        run: |
+          mkdir -p dist
+          # Buscamos el .dmg generado. Pake usa el nombre que le pasamos,
+          # pero el sufijo de versión/arch puede variar — globbing al rescate.
+          shopt -s nullglob
+          dmgs=( *.dmg )
+          if [ ${#dmgs[@]} -eq 0 ]; then
+            echo "::error::No se encontró ningún .dmg después del build"
+            exit 1
+          fi
+
+          # Renombramos a algo predecible: TestPrep_v1.0.0_universal.dmg
+          src="${dmgs[0]}"
+          version="${{ inputs.app_version }}"
+          # Sanitizar nombre: espacios a guiones, sin caracteres raros
+          safe_name=$(echo "${{ inputs.app_name }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+          dest="dist/${safe_name}_v${version}_universal.dmg"
+          mv "$src" "$dest"
+
+          # Tamaño en MB para el log
+          size=$(du -h "$dest" | cut -f1)
+          echo "✓ Generado: $dest ($size)"
+          echo "dmg_path=$dest" >> "$GITHUB_OUTPUT"
+          echo "dmg_name=$(basename "$dest")" >> "$GITHUB_OUTPUT"
+
+      # ── 11. Subir el .dmg como artifact descargable ────────────────
+      # Los artifacts viven 90 días por default y se bajan desde la página
+      # del workflow run. No requieren configurar storage extra.
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.dmg_name }}
+          path: ${{ steps.package.outputs.dmg_path }}
+          retention-days: 90
+          # if-no-files-found: error garantiza que el workflow falle (en lugar
+          # de pasar en silencio) si por alguna razón el .dmg no quedó donde
+          # esperábamos.
+          if-no-files-found: error
+
+      # ── 12. Resumen visible en la UI del run ───────────────────────
+      - name: Resumen
+        run: |
+          echo "### ✅ Build completado" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**App:** ${{ inputs.app_name }} v${{ inputs.app_version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Arquitectura:** Universal (Intel + Apple Silicon)" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Archivo:** \`${{ steps.package.outputs.dmg_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Bajalo desde la sección **Artifacts** al final de esta página." >> "$GITHUB_STEP_SUMMARY"
