@@ -330,9 +330,12 @@
   #mock-progress { display: flex; gap: 3px; flex-wrap: wrap; margin-bottom: 16px; }
   .mock-dot {
     width: 16px; height: 16px; border-radius: 3px;
-    background: var(--surface2); cursor: pointer; transition: background 0.1s;
+    background: var(--surface2); transition: background 0.1s;
     border: 1px solid var(--border);
   }
+  /* Solo durante revisión post-examen los dots son navegables (cursor pointer).
+     Durante el examen son solo indicadores visuales (sin onclick, sin pointer). */
+  .mock-dot.navigable { cursor: pointer; }
   .mock-dot.answered { background: var(--accent); border-color: var(--accent); }
   .mock-dot.current { outline: 2px solid var(--accent); outline-offset: 1px; }
   .mock-dot.correct { background: var(--success); border-color: var(--success); }
@@ -968,7 +971,7 @@
     <div id="mock-start-screen" class="card" style="text-align:center;padding:40px 24px;">
       <div style="font-size:40px;margin-bottom:16px;">✈️</div>
       <h2 style="margin-bottom:8px;">Examen de práctica — PPA</h2>
-      <p style="color:var(--muted);font-size:14px;margin-bottom:24px;">Se seleccionarán 60 preguntas aleatorias del banco.<br>Cada respuesta correcta vale <strong>1.67 puntos</strong> (100% = 60/60).<br>Tiempo límite: <strong>180 minutos</strong> (3 horas).</p>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:24px;">Se seleccionarán 60 preguntas aleatorias del banco.<br>Cada respuesta correcta vale <strong>1.67 puntos</strong> (100% = 60/60).<br>Tiempo límite: <strong>120 minutos</strong> (2 horas).</p>
       <button class="big-btn" onclick="startMock()">Iniciar examen</button>
     </div>
 
@@ -981,11 +984,11 @@
         <div id="mock-banner-middle">
           <div id="mock-timer-wrap">
             <span class="mt-label">⏱</span>
-            <span id="mock-timer">180:00</span>
+            <span id="mock-timer">120:00</span>
           </div>
         </div>
-        <div style="text-align:right;">
-          <div class="m-info">Puntaje actual</div>
+        <div id="mock-score-block" style="text-align:right;display:none;">
+          <div class="m-info">Puntaje</div>
           <div id="mock-score-live" class="m-score">0%</div>
         </div>
       </div>
@@ -1415,6 +1418,22 @@ const BANKS = {
 // Referencia dinámica al banco actual (se actualiza al cambiar de banco)
 let QUESTIONS = BANKS.ppa.questions;
 
+// FIX bug #1: escape de HTML antes de insertar texto en innerHTML.
+// Las preguntas y respuestas de los bancos se inyectaban directamente con template
+// literals (${q.question}, ${a}, etc.). Cualquier caracter '<', '>' o '&' en el texto
+// hacía que el navegador lo interpretara como HTML y la pregunta se "cortaba" o
+// renderizaba mal. Esta función convierte esos caracteres a entidades HTML seguras.
+// Pasar todo string que provenga de un banco por aquí antes de usarlo en innerHTML.
+function escapeHtml(str) {
+  if(str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 let state = {
   currentBank: null,          // 'ppa' | 'ifr' | 'com' | null (null = mostrar selector)
   banks: {                    // progreso y sesión independientes por banco (se agregan más conforme se habilitan)
@@ -1582,8 +1601,53 @@ Object.defineProperty(state, 'studyIdx', {
 
 load();
 
+// FIX bug #10: detección de mock activo. "Activo" = el examen está corriendo
+// (cronómetro vivo + mock no terminado). Lo usamos para pedir confirmación
+// antes de dejar el panel mock vía la barra de navegación.
+function mockIsActive() {
+  return !!mockTimerInterval && !state.mockDone;
+}
+
+// FIX bug #10: descarte limpio de un mock en curso cuando el alumno confirma
+// salir. Critical: NO marca nada en state.progress — el examen es como si
+// nunca hubiera ocurrido. Esto difiere de finishMock() que sí persiste las
+// respuestas incorrectas para revisión. Solo se llama tras confirmación
+// explícita del usuario.
+function discardActiveMock() {
+  stopMockTimer();
+  state.mockQuestions = [];
+  state.mockAnswers = {};
+  state.mockIdx = 0;
+  state.mockDone = false;
+  state.mockForceFinish = false;
+  // Resetear UI del panel mock para que la próxima visita muestre la
+  // pantalla de inicio del examen, no la pantalla activa con datos viejos.
+  const startScreen = document.getElementById('mock-start-screen');
+  const activeScreen = document.getElementById('mock-active-screen');
+  const resultScreen = document.getElementById('mock-result');
+  if(startScreen) startScreen.style.display = 'block';
+  if(activeScreen) activeScreen.style.display = 'none';
+  if(resultScreen) resultScreen.style.display = 'none';
+}
+
 function showPanel(id) {
-  // Si salimos del panel mock con un examen en curso, detener el cronómetro
+  // FIX bug #10: si hay un mock en curso y el alumno está navegando FUERA del
+  // panel mock (vía la barra de navegación, típicamente), pedir confirmación.
+  // Si confirma, el examen se descarta limpiamente sin marcar nada en el
+  // progreso del banco. Si cancela, la navegación se aborta y sigue en el mock.
+  // Se omite la verificación si ya estamos saliendo del mock por finishMock()
+  // (state.mockDone === true), porque ahí no hay nada que descartar.
+  if(id !== 'mock' && mockIsActive()) {
+    if(!confirm('Hay un examen de práctica en curso. Si sales perderás todo el progreso del examen y las preguntas respondidas no se marcarán como incorrectas en el banco. ¿Continuar?')) {
+      return; // cancelar la navegación; sigue en el mock
+    }
+    discardActiveMock();
+  }
+
+  // Safety net: si por alguna razón hay un timer vivo sin mock activo (ej. tras
+  // finishMock antes de que se limpie el interval), asegurarse de detenerlo.
+  // El caso principal de mock-activo-+-navegación ya lo cubrió el guard de
+  // bug #10 arriba (con confirmación + discardActiveMock).
   if(id !== 'mock' && mockTimerInterval) {
     stopMockTimer();
   }
@@ -1718,9 +1782,14 @@ function continueStudy() {
 
 // ¿Hay una sesión de estudio "activa" (cola iniciada y aún no terminada)?
 function hasStudySession() {
+  // FIX bug #3: usar <= en vez de <. Antes, cuando el alumno llegaba a la última
+  // pregunta de la cola (studyIdx === length - 1), esta función retornaba false y
+  // el dashboard mostraba "Iniciar estudio" como si no hubiera sesión. Ahora la
+  // sesión sigue contando como activa hasta que el alumno presione "Finalizar"
+  // (que vacía studyQueue) o abandone explícitamente.
   return state.studyQueue
       && state.studyQueue.length > 0
-      && state.studyIdx < state.studyQueue.length - 1;
+      && state.studyIdx <= state.studyQueue.length - 1;
 }
 
 // ═══════════ PANTALLA DE CONFIGURACIÓN DE SESIÓN ═══════════
@@ -1881,12 +1950,12 @@ function renderStudyQ() {
 
   let answersHtml = '';
   if(correctMode) {
-    answersHtml = `<div class="correct-only-display"><strong>Respuesta correcta</strong>${q.answers[q.correct-1]}</div>`;
+    answersHtml = `<div class="correct-only-display"><strong>Respuesta correcta</strong>${escapeHtml(q.answers[q.correct-1])}</div>`;
   } else {
     answersHtml = '<div class="answers">' + q.answers.map((a,i) => {
       return `<div class="answer-opt" onclick="selectAnswer(${qIdx}, ${i+1})" id="opt-${qIdx}-${i+1}">
         <span class="opt-letter">${LETTERS[i]}</span>
-        <span class="opt-text">${a}</span>
+        <span class="opt-text">${escapeHtml(a)}</span>
       </div>`;
     }).join('') + '</div>';
   }
@@ -1904,7 +1973,7 @@ function renderStudyQ() {
           ${isReview ? '🔖 Marcada' : '+ Para revisión'}
         </button>
       </div>
-      <div class="q-text"><span class="q-abs-num">#${qIdx+1}</span>${q.question}</div>
+      <div class="q-text"><span class="q-abs-num">#${qIdx+1}</span>${escapeHtml(q.question)}</div>
       ${answersHtml}
       <div class="q-nav" style="margin-top:20px;">
         <button class="q-nav-btn" onclick="studyNav(-1)" ${state.studyIdx===0?'disabled':''}>← Anterior</button>
@@ -1945,8 +2014,17 @@ function selectAnswer(qIdx, chosen) {
     else if(i+1 !== chosen) opt.classList.add('dimmed');
   });
   if(!state.progress[qIdx]) state.progress[qIdx] = {};
-  if(chosen === correct) state.progress[qIdx].correct = true;
-  else state.progress[qIdx].wrong = true;
+  // FIX bug #2: limpiar el flag opuesto al actualizar. Sin esto, una pregunta
+  // respondida primero correcta y luego mal (o viceversa) acumula ambos flags,
+  // lo que contamina el filtro "incorrectas" en startStudy('wrong') y deja
+  // estadísticas inconsistentes en el dashboard.
+  if(chosen === correct) {
+    state.progress[qIdx].correct = true;
+    delete state.progress[qIdx].wrong;
+  } else {
+    state.progress[qIdx].wrong = true;
+    delete state.progress[qIdx].correct;
+  }
   save();
 }
 
@@ -2034,7 +2112,7 @@ function applyStoredTheme() {
 }
 
 // ═══════════ CRONÓMETRO DEL EXAMEN ═══════════
-const MOCK_TIME_TOTAL = 180 * 60; // 180 minutos en segundos
+const MOCK_TIME_TOTAL = 120 * 60; // 120 minutos en segundos
 let mockTimerInterval = null;
 let mockTimeRemaining = MOCK_TIME_TOTAL;
 
@@ -2075,6 +2153,8 @@ function startMock() {
   document.getElementById('mock-start-screen').style.display = 'none';
   document.getElementById('mock-active-screen').style.display = 'block';
   document.getElementById('mock-result').style.display = 'none';
+  // FIX bug #9: ocultar el puntaje al iniciar (queda oculto durante todo el examen)
+  document.getElementById('mock-score-block').style.display = 'none';
 
   const shuffled = [...QUESTIONS.keys()].sort(() => Math.random()-0.5).slice(0, 60);
   state.mockQuestions = shuffled;
@@ -2100,16 +2180,24 @@ function renderMock() {
 
 function renderMockDots() {
   const wrap = document.getElementById('mock-progress');
+  // FIX bug #9: los dots solo son clickeables DESPUÉS de terminar el examen
+  // (durante la revisión). Durante el examen son solo indicador visual de
+  // progreso. La navegación se hace con flechas, botón "Siguiente" o el avance
+  // automático al responder. Esto evita la race condition con el setTimeout de
+  // 600ms en mockAnswer (que sobrescribía el dot que el alumno había clickeado).
   wrap.innerHTML = state.mockQuestions.map((qIdx,i) => {
     let cls = 'mock-dot';
     if(state.mockDone) {
       if(state.mockAnswers[i] === QUESTIONS[qIdx].correct) cls += ' correct';
       else if(state.mockAnswers[i]) cls += ' wrong';
+      cls += ' navigable'; // post-examen: cursor pointer + onclick
     } else {
       if(state.mockAnswers[i]) cls += ' answered';
+      // durante examen: sin navigable, sin onclick
     }
     if(i === state.mockIdx) cls += ' current';
-    return `<div class="${cls}" onclick="state.mockIdx=${i};renderMock()" title="P${i+1}"></div>`;
+    const clickHandler = state.mockDone ? `onclick="state.mockIdx=${i};renderMock()"` : '';
+    return `<div class="${cls}" ${clickHandler} title="P${i+1}"></div>`;
   }).join('');
 }
 
@@ -2133,7 +2221,7 @@ function renderMockQ(idx) {
     const clickable = (!done && !chosen) ? `onclick="mockAnswer(${idx},${i+1})"` : '';
     return `<div class="${cls}" ${clickable}>
       <span class="opt-letter">${LETTERS[i]}</span>
-      <span class="opt-text">${a}</span>
+      <span class="opt-text">${escapeHtml(a)}</span>
     </div>`;
   }).join('');
 
@@ -2145,7 +2233,7 @@ function renderMockQ(idx) {
           ${state.progress[qIdx]?.review ? '🔖 Marcada' : '+ Para revisión'}
         </button>` : ''}
       </div>
-      <div class="q-text">${q.question}</div>
+      <div class="q-text">${escapeHtml(q.question)}</div>
       <div class="answers">${answersHtml}</div>
       <div class="q-nav" style="margin-top:20px;">
         <button class="q-nav-btn" onclick="state.mockIdx=Math.max(0,state.mockIdx-1);renderMock()" ${idx===0?'disabled':''}>← Anterior</button>
@@ -2165,13 +2253,19 @@ function mockAnswer(idx, chosen) {
 }
 
 function updateMockScore() {
-  const answered = Object.keys(state.mockAnswers).length;
-  let correct = 0;
-  state.mockQuestions.forEach((qIdx,i) => {
-    if(state.mockAnswers[i] === QUESTIONS[qIdx].correct) correct++;
-  });
-  const pct = answered > 0 ? Math.round(correct/60*100) : 0;
-  document.getElementById('mock-score-live').textContent = pct + '%';
+  // FIX bug #9: durante el examen NO se muestra el puntaje (como el examen real DGAC).
+  // El bloque #mock-score-block queda permanentemente oculto y el resultado final
+  // se muestra en el panel `mock-result` con #res-score / #res-correct / #res-wrong.
+  // Esta función queda como noop por compatibilidad con las llamadas existentes en
+  // renderMock() y mockAnswer(); si en algún momento querés re-habilitar un score
+  // en vivo, descomentá el cálculo de abajo y mostrá #mock-score-block.
+  // const answered = Object.keys(state.mockAnswers).length;
+  // let correct = 0;
+  // state.mockQuestions.forEach((qIdx,i) => {
+  //   if(state.mockAnswers[i] === QUESTIONS[qIdx].correct) correct++;
+  // });
+  // const pct = answered > 0 ? Math.round(correct/60*100) : 0;
+  // document.getElementById('mock-score-live').textContent = pct + '%';
 }
 
 function finishMock() {
@@ -2241,7 +2335,7 @@ function renderReviewList() {
     const p = state.progress[i] || {};
     const tag = p.correct ? '<span class="tag correct">Correcta</span>' : (p.wrong ? '<span class="tag wrong">Incorrecta</span>' : '');
     return `<div class="review-item" onclick="jumpToQuestion(${i})">
-      <div class="ri-q">${q.question}</div>
+      <div class="ri-q">${escapeHtml(q.question)}</div>
       <div class="ri-meta">
         <span class="tag review">Para revisión</span>
         ${tag}
@@ -2326,8 +2420,8 @@ function renderBankList() {
               onclick="${onclick}">
         <div class="bank-icon">${b.icon}</div>
         <div class="bank-info">
-          <div class="bank-name">${b.name}${badge}</div>
-          <div class="bank-desc">${rightLabel}</div>
+          <div class="bank-name">${escapeHtml(b.name)}${badge}</div>
+          <div class="bank-desc">${escapeHtml(rightLabel)}</div>
         </div>
         <div class="bank-arrow">${needsLicense ? '🔒' : '→'}</div>
       </button>
@@ -2438,6 +2532,14 @@ function welcomeScreenState() {
 }
 
 // Renderiza la pantalla de bienvenida según el estado
+//
+// ⚠️ DEUDA TÉCNICA — la variable local `state` en esta función SOMBREA al `state`
+// global de la app (objeto con currentBank, banks, etc.). Aquí solo se usa como
+// el objeto { show, reason } que retorna welcomeScreenState(), así que funciona,
+// pero si en el futuro necesitás leer el state global de la app dentro de esta
+// función (ej. state.currentBank), NO va a funcionar — vas a estar leyendo
+// propiedades del objeto local. Renombrá la variable local (ej. `ws` o
+// `welcomeState`) si necesitás acceso al state global aquí.
 function renderWelcomeScreen() {
   const state = welcomeScreenState();
   const screen = document.getElementById('welcome-screen');
@@ -2489,7 +2591,7 @@ function showWelcomePostActivation() {
   const bankLabels = {};
   Object.values(BANKS).forEach(b => { bankLabels[b.id] = b.name; });
   const banksHtml = lic.banks.map(bid =>
-    `<span class="welcome-bank-pill">${bankLabels[bid] || bid.toUpperCase()}</span>`
+    `<span class="welcome-bank-pill">${escapeHtml(bankLabels[bid] || bid.toUpperCase())}</span>`
   ).join('');
 
   let expiryHtml;
@@ -2530,6 +2632,15 @@ function showWelcomePostActivation() {
 }
 
 // Botón "Continuar →" cierra la pantalla de bienvenida y va al selector
+//
+// ⚠️ DEUDA TÉCNICA — dismissWelcome está declarada DOS VECES (acá y abajo en
+// la línea ~2777). JavaScript usa siempre la SEGUNDA definición; esta primera
+// queda muerta. Si querés cambiar el comportamiento del botón "Continuar",
+// editá la de abajo, no esta. La diferencia entre ambas:
+//   • Esta (primera): usa classList.remove('active')
+//   • La de abajo (segunda, la que efectivamente corre): usa style.display='none'
+//     y además muestra nav/app y llama refreshLicensePill().
+// Si en algún momento consolidás las dos, podés borrar esta sin riesgo.
 function dismissWelcome() {
   document.getElementById('welcome-screen').classList.remove('active');
   // Si hay un currentBank guardado y la licencia lo cubre, ir al dashboard;
@@ -2743,7 +2854,11 @@ function showWelcomeSuccess() {
   success.style.display = 'flex';
 }
 
-// Cerrar pantalla de bienvenida y entrar a la app normalmente
+// Cerrar pantalla de bienvenida y entrar a la app normalmente.
+// ⚠ ESTA es la definición que JavaScript usa en runtime: arriba (~L2591) hay
+// otra `dismissWelcome` que queda sobrescrita por esta. Si tocás esta función,
+// recordá que la de arriba no tiene efecto. Cuando consolides las dos, podés
+// borrar la primera; mientras tanto, ambas conviven sin problema funcional.
 function dismissWelcome() {
   document.getElementById('welcome-screen').style.display = 'none';
   document.getElementById('welcome-success').style.display = 'none';
