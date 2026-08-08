@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-08",
+  "banks": {
+    "ppa": {
+      "version": 1,
+      "file": "banks/ppa.json",
+      "count": 379
+    },
+    "ifr": {
+      "version": 1,
+      "file": "banks/ifr.json",
+      "count": 688
+    },
+    "com": {
+      "version": 1,
+      "file": "banks/com.json",
+      "count": 321
+    }
+  }
+}
