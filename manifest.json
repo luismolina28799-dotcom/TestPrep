@@ -9,10 +9,10 @@
       "figuresVersion": 1
     },
     "ifr": {
-      "version": 6,
+      "version": 7,
       "file": "banks/ifr.json",
       "count": 688,
-      "figuresVersion": 2
+      "figuresVersion": 3
     },
     "com": {
       "version": 1,
