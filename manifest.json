@@ -1,21 +1,24 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-08",
+  "updatedAt": "2026-10-30",
   "banks": {
     "ppa": {
       "version": 1,
       "file": "banks/ppa.json",
-      "count": 379
+      "count": 379,
+      "figuresVersion": 1
     },
     "ifr": {
-      "version": 5,
+      "version": 6,
       "file": "banks/ifr.json",
       "count": 688
+      "figuresVersion": 1
     },
     "com": {
       "version": 1,
       "file": "banks/com.json",
       "count": 321
+      "figuresVersion": 1
     }
   }
 }
