@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-30",
+  "updatedAt": "2026-10-31",
   "banks": {
     "ppa": {
       "version": 1,
@@ -11,13 +11,13 @@
     "ifr": {
       "version": 6,
       "file": "banks/ifr.json",
-      "count": 688
+      "count": 688,
       "figuresVersion": 2
     },
     "com": {
       "version": 1,
       "file": "banks/com.json",
-      "count": 321
+      "count": 321,
       "figuresVersion": 1
     }
   }
